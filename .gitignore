@@ -170,6 +170,9 @@ __pycache__/
 !.agents/rules
 local_data/**
 
+# Local Geyser plugin design notes
+/docs/geyser-plugins/
+
 stako/**/*
 perf-artifacts/**/*
 

@@ -7386,6 +7386,8 @@ dependencies = [
  "tracing-test",
  "zakura-chain",
  "zakura-consensus",
+ "zakura-geyser-plugin-interface",
+ "zakura-geyser-plugin-manager",
  "zakura-header-chain",
  "zakura-jsonl-trace",
  "zakura-network",
@@ -7564,6 +7566,33 @@ dependencies = [
  "zakura-tower-fallback",
  "zakura-transparent",
  "zcash_script",
+]
+
+[[package]]
+name = "zakura-geyser-plugin-interface"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "zakura-chain",
+]
+
+[[package]]
+name = "zakura-geyser-plugin-manager"
+version = "0.1.0"
+dependencies = [
+ "humantime-serde",
+ "metrics",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "zakura-chain",
+ "zakura-geyser-plugin-interface",
 ]
 
 [[package]]

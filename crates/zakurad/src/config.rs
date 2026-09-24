@@ -60,6 +60,9 @@ pub struct ZakuradConfig {
     /// Metrics configuration
     pub metrics: crate::components::metrics::Config,
 
+    /// Geyser plugin configuration.
+    pub geyser: zakura_geyser_plugin_manager::Config,
+
     /// Networking configuration
     pub network: zakura_network::config::Config,
 

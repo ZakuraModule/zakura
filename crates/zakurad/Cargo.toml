@@ -174,6 +174,8 @@ zakura-chain = { path = "../zakura-chain", version = "8.0.0" }
 zakura-consensus = { path = "../zakura-consensus", version = "9.0.0" }
 zakura-header-chain = { path = "../zakura-header-chain", version = "3.0.0" }
 zakura-jsonl-trace = { path = "../zakura-jsonl-trace", version = "1.2.0" }
+zakura-geyser-plugin-interface = { workspace = true }
+zakura-geyser-plugin-manager = { workspace = true }
 zakura-network = { path = "../zakura-network", version = "8.0.0" }
 zakura-node-services = { path = "../zakura-node-services", version = "3.2.5", features = ["rpc-client"] }
 zakura-rpc = { path = "../zakura-rpc", version = "11.0.0" }

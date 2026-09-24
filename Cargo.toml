@@ -16,6 +16,8 @@ members = [
         "deploy/zakura-watchdog",
         "crates/xtask",
         "crates/zakura-jsonl-trace",
+        "crates/zakura-geyser-plugin-interface",
+        "crates/zakura-geyser-plugin-manager",
 ]
 
 # The asset packaging crate publishes on the release-state cadence rather than with the
@@ -47,6 +49,8 @@ edition = "2021"
 # published name now match, so no `package` rename is needed: every consumer, script, and
 # gate refers to `zakura-assets` and nothing else.
 zakura-assets = { version = "=0.3490665.0" }
+zakura-geyser-plugin-interface = { path = "crates/zakura-geyser-plugin-interface", version = "0.1.0" }
+zakura-geyser-plugin-manager = { path = "crates/zakura-geyser-plugin-manager", version = "0.1.0" }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
 orchard = { version = "2.0.0", package = "zakura-orchard" }
 sapling-crypto = { version = "2.0.0", package = "zakura-sapling-crypto" }

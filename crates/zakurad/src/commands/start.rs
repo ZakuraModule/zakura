@@ -107,7 +107,7 @@ use zakura::{
 use crate::{
     application::{build_version, user_agent, LAST_WARN_ERROR_LOG_SENDER},
     components::{
-        health,
+        geyser, health,
         inbound::{self, InboundSetupData, MAX_INBOUND_RESPONSE_TIME},
         mempool::{self, Mempool},
         sync::{self, show_block_chain_progress, VERIFICATION_PIPELINE_SCALING_MULTIPLIER},
@@ -371,6 +371,10 @@ impl StartCmd {
         Self::validate_consensus_config(&config)?;
         Self::validate_debug_blocksync_throughput_config(&config)?;
         config.rpc.validate().map_err(|error| eyre!(error))?;
+        config
+            .geyser
+            .validate()
+            .map_err(|error| eyre!("invalid Geyser plugin configuration: {error}"))?;
 
         if config.zcashd_compat.enabled {
             zcashd_compat::run_preflight(&config, self.unsafe_low_specs)?;
@@ -692,6 +696,15 @@ impl StartCmd {
         if tx_verifier_setup_tx.send(mempool.clone()).is_err() {
             warn!("error setting up the transaction verifier with a handle to the mempool service");
         };
+
+        let geyser_runtime = geyser::init(
+            &config.geyser,
+            read_only_state_service.clone(),
+            chain_tip_change.clone(),
+            mempool_transaction_subscriber.clone(),
+            shutdown.clone(),
+        )
+        .await?;
 
         info!("fully initializing inbound peer request handler");
         // Fully start the inbound service as soon as possible
@@ -1184,6 +1197,8 @@ impl StartCmd {
         info!("exiting Zakura: asking other tasks to stop");
         shutdown.cancel();
         zakura_chain::shutdown::set_shutting_down();
+
+        geyser_runtime.shutdown().await;
 
         // ongoing tasks
         rpc_task_handle.abort();
