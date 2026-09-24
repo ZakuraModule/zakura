@@ -51,6 +51,7 @@ edition = "2021"
 zakura-assets = { version = "=0.3490665.0" }
 zakura-geyser-plugin-interface = { path = "crates/zakura-geyser-plugin-interface", version = "0.1.0" }
 zakura-geyser-plugin-manager = { path = "crates/zakura-geyser-plugin-manager", version = "0.1.0" }
+zakura-grpc-geyser = { path = "../zakura-grpc/zakura-grpc-geyser", version = "0.1.0" }
 incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
 orchard = { version = "2.0.0", package = "zakura-orchard" }
 sapling-crypto = { version = "2.0.0", package = "zakura-sapling-crypto" }

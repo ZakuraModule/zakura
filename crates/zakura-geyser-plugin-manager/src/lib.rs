@@ -27,7 +27,7 @@ use tokio::{
     time::{self, Instant as TokioInstant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use zakura_geyser_plugin_interface::{
     EventEnvelope, EventKind, EventSubscriptions, GeyserPlugin, PluginError, PluginEvent,
     PluginResult, SessionId, EVENT_SCHEMA_VERSION, GEYSER_INTERFACE_VERSION,
@@ -446,6 +446,17 @@ impl PluginPublisher {
                 }
             }
         }
+
+        debug!(
+            session_id = self.inner.session_id.0,
+            sequence,
+            event = event_name,
+            event_bytes,
+            routed = report.routed,
+            rejected = report.rejected,
+            skipped = report.skipped,
+            "published Geyser event"
+        );
 
         report
     }

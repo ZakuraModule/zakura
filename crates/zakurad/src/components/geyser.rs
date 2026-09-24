@@ -52,9 +52,10 @@ pub async fn init(
     mempool_subscriber: MempoolTxSubscriber,
     shutdown: CancellationToken,
 ) -> Result<GeyserRuntime, Report> {
-    let manager =
-        GeyserPluginManager::start(config.clone(), PluginRegistry::with_builtin_plugins())
-            .map_err(|error| eyre!("Geyser plugin manager startup failed: {error}"))?;
+    let mut registry = PluginRegistry::with_builtin_plugins();
+    zakura_grpc_geyser::register(&mut registry);
+    let manager = GeyserPluginManager::start(config.clone(), registry)
+        .map_err(|error| eyre!("Geyser plugin manager startup failed: {error}"))?;
     let publisher = manager.publisher();
     let mut adapters = Vec::new();
 
