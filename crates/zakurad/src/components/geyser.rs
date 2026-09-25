@@ -102,7 +102,7 @@ pub async fn init(
         adapters.push(tokio::spawn(forward_finalized_blocks(
             listener.into_receiver(),
             publisher.clone(),
-            network,
+            network.clone(),
             shutdown.clone(),
         )));
     }
@@ -119,6 +119,7 @@ pub async fn init(
         adapters.push(tokio::spawn(forward_mempool_changes(
             mempool_subscriber.subscribe(),
             publisher,
+            network,
             shutdown,
         )));
     }
@@ -250,6 +251,7 @@ async fn forward_best_chain_changes(
 async fn forward_mempool_changes(
     mut changes: broadcast::Receiver<MempoolChange>,
     publisher: PluginPublisher,
+    network: Network,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -274,15 +276,18 @@ async fn forward_mempool_changes(
                     }
                 };
 
-                let kind = match change.kind() {
+                let (change_kind, transaction_ids, transactions) = change.into_parts();
+                let kind = match change_kind {
                     MempoolChangeKind::Added => MempoolEventKind::Added,
                     MempoolChangeKind::Invalidated => MempoolEventKind::Invalidated,
                     MempoolChangeKind::Mined => MempoolEventKind::Mined,
                 };
-                let transaction_ids: Arc<[_]> = change.into_tx_ids().into_iter().collect();
+                let transaction_ids: Arc<[_]> = transaction_ids.into_iter().collect();
                 publisher.try_publish(PluginEvent::MempoolChanged(MempoolEvent::new(
+                    network.clone(),
                     kind,
                     transaction_ids,
+                    transactions,
                 )));
             }
         }

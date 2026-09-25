@@ -19,7 +19,7 @@ use zakura_chain::{
     transparent::{self, OutPoint},
 };
 use zakura_consensus::transaction as tx;
-use zakura_node_services::mempool::QueueSource;
+use zakura_node_services::mempool::{MempoolChangeKind, QueueSource};
 use zakura_state::{Config as StateConfig, CHAIN_TIP_UPDATE_WAIT_LIMIT};
 use zakura_test::mock_service::{MockService, PanicAssertion};
 
@@ -1810,9 +1810,15 @@ async fn mempool_responds_to_await_output() -> Result<(), Report> {
         .expect("should not timeout")
         .expect("recv should return Ok");
 
+    assert_eq!(mempool_change.kind(), MempoolChangeKind::Added);
     assert_eq!(
-        mempool_change,
-        MempoolChange::added([unmined_tx_id].into_iter().collect())
+        mempool_change.tx_ids(),
+        &[unmined_tx_id].into_iter().collect()
+    );
+    assert_eq!(mempool_change.transactions.len(), 1);
+    assert_eq!(
+        mempool_change.transactions[0].transaction.id(),
+        unmined_tx_id
     );
 
     let pending_gossip_tx_ids = mempool

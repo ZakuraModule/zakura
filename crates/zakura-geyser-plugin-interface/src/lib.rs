@@ -11,15 +11,15 @@ use thiserror::Error;
 use zakura_chain::{
     block::{self, Block},
     parameters::Network,
-    transaction::{self, UnminedTxId},
+    transaction::{self, UnminedTxId, VerifiedUnminedTx},
     transparent,
 };
 
 /// The plugin callback interface version implemented by this crate.
-pub const GEYSER_INTERFACE_VERSION: u32 = 2;
+pub const GEYSER_INTERFACE_VERSION: u32 = 3;
 
 /// The event envelope schema version implemented by this crate.
-pub const EVENT_SCHEMA_VERSION: u32 = 2;
+pub const EVENT_SCHEMA_VERSION: u32 = 3;
 
 /// A unique identifier for one node process event-producing session.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -183,27 +183,56 @@ impl BestChainChange {
 /// A local mempool transition.
 #[derive(Clone, Debug)]
 pub struct MempoolEvent {
+    /// Network used to decode transparent addresses.
+    pub network: Network,
     /// Kind of transition.
     pub kind: MempoolEventKind,
     /// Affected unmined transaction IDs.
     pub transaction_ids: Arc<[UnminedTxId]>,
+    /// Complete verified transactions when [`Self::kind`] is [`MempoolEventKind::Added`].
+    pub transactions: Arc<[VerifiedUnminedTx]>,
 }
 
 impl MempoolEvent {
     /// Creates a mempool event.
-    pub fn new(kind: MempoolEventKind, transaction_ids: Arc<[UnminedTxId]>) -> Self {
+    pub fn new(
+        network: Network,
+        kind: MempoolEventKind,
+        transaction_ids: Arc<[UnminedTxId]>,
+        transactions: Arc<[VerifiedUnminedTx]>,
+    ) -> Self {
         Self {
+            network,
             kind,
             transaction_ids,
+            transactions,
         }
     }
 
     fn estimated_size_bytes(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(
-            self.transaction_ids
-                .len()
-                .saturating_mul(std::mem::size_of::<UnminedTxId>()),
-        )
+        let transaction_id_bytes = self
+            .transaction_ids
+            .len()
+            .saturating_mul(std::mem::size_of::<UnminedTxId>());
+        let transaction_bytes = self.transactions.iter().fold(0usize, |total, transaction| {
+            let spent_output_bytes =
+                transaction
+                    .spent_outputs
+                    .iter()
+                    .fold(0usize, |spent_total, output| {
+                        spent_total
+                            .saturating_add(std::mem::size_of::<transparent::Output>())
+                            .saturating_add(output.lock_script.as_raw_bytes().len())
+                    });
+            total
+                .saturating_add(transaction.transaction.size())
+                .saturating_add(spent_output_bytes)
+                .saturating_add(std::mem::size_of::<VerifiedUnminedTx>())
+        });
+
+        std::mem::size_of::<Self>()
+            .saturating_add(transaction_id_bytes)
+            .saturating_add(transaction_bytes)
     }
 }
 

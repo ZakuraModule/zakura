@@ -23,6 +23,7 @@ use std::{
     future::Future,
     iter,
     pin::{pin, Pin},
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -935,8 +936,27 @@ impl Service<Request> for Mempool {
 
                 pending_gossip_tx_ids.extend(send_to_peers_ids.iter().copied());
 
+                let added_transactions: Arc<[_]> = send_to_peers_ids
+                    .iter()
+                    .filter_map(|transaction_id| {
+                        storage
+                            .transactions()
+                            .get(&transaction_id.mined_id())
+                            .filter(|transaction| transaction.transaction.id() == *transaction_id)
+                            .cloned()
+                    })
+                    .collect();
+                debug_assert_eq!(
+                    added_transactions.len(),
+                    send_to_peers_ids.len(),
+                    "newly added mempool transactions remain in storage until notification"
+                );
+
                 self.transaction_sender
-                    .send(MempoolChange::added(send_to_peers_ids))?;
+                    .send(MempoolChange::added_with_transactions(
+                        send_to_peers_ids,
+                        added_transactions,
+                    ))?;
             }
 
             // Prune transaction IDs that no longer need gossip from the pending set.

@@ -1,9 +1,9 @@
 //! Defines the [`MempoolChange`] and [`MempoolChangeKind`] types used by the mempool change broadcast channel.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use tokio::sync::broadcast;
-use zakura_chain::transaction::UnminedTxId;
+use zakura_chain::transaction::{UnminedTxId, VerifiedUnminedTx};
 
 /// A newtype around [`broadcast::Sender<MempoolChange>`] used to
 /// subscribe to the channel without an active receiver.
@@ -34,18 +34,26 @@ pub enum MempoolChangeKind {
 }
 
 /// Represents a change in the mempool's verified set of transactions
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MempoolChange {
     /// The kind of change that occurred in the mempool.
     pub kind: MempoolChangeKind,
     /// The set of [`UnminedTxId`]s of transactions that were affected by the change.
     pub tx_ids: HashSet<UnminedTxId>,
+    /// Complete verified transactions for an [`MempoolChangeKind::Added`] change.
+    ///
+    /// Other change kinds and synthetic notifications can omit this payload.
+    pub transactions: Arc<[VerifiedUnminedTx]>,
 }
 
 impl MempoolChange {
     /// Creates a new [`MempoolChange`] with the specified kind and transaction IDs.
     pub fn new(kind: MempoolChangeKind, tx_ids: HashSet<UnminedTxId>) -> Self {
-        Self { kind, tx_ids }
+        Self {
+            kind,
+            tx_ids,
+            transactions: Arc::from([]),
+        }
     }
 
     /// Returns the kind of change that occurred in the mempool.
@@ -63,6 +71,17 @@ impl MempoolChange {
         self.tx_ids
     }
 
+    /// Consumes self and returns all data carried by this change.
+    pub fn into_parts(
+        self,
+    ) -> (
+        MempoolChangeKind,
+        HashSet<UnminedTxId>,
+        Arc<[VerifiedUnminedTx]>,
+    ) {
+        (self.kind, self.tx_ids, self.transactions)
+    }
+
     /// Returns a reference to the set of [`UnminedTxId`]s of transactions that were affected by the change.
     pub fn tx_ids(&self) -> &HashSet<UnminedTxId> {
         &self.tx_ids
@@ -71,6 +90,21 @@ impl MempoolChange {
     /// Creates a new [`MempoolChange`] indicating that transactions were added to the mempool.
     pub fn added(tx_ids: HashSet<UnminedTxId>) -> Self {
         Self::new(MempoolChangeKind::Added, tx_ids)
+    }
+
+    /// Creates an added notification with the complete verified transactions.
+    pub fn added_with_transactions(
+        tx_ids: HashSet<UnminedTxId>,
+        transactions: Arc<[VerifiedUnminedTx]>,
+    ) -> Self {
+        debug_assert!(transactions
+            .iter()
+            .all(|transaction| tx_ids.contains(&transaction.transaction.id())));
+        Self {
+            kind: MempoolChangeKind::Added,
+            tx_ids,
+            transactions,
+        }
     }
 
     /// Creates a new [`MempoolChange`] indicating that transactions were invalidated or rejected from the mempool.
