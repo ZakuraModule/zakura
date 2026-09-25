@@ -164,6 +164,11 @@ async fn listener_preserves_source_receipts() {
     let mut child = blocks[1].clone().prepare();
     child.receipt_order = Some(1);
     state.commit_block(child, &finalized).unwrap();
+    let expected_spent_outputs: std::collections::HashMap<_, _> = state
+        .chain_iter()
+        .flat_map(|chain| chain.blocks.values())
+        .map(|block| (block.hash, Arc::clone(&block.spent_outputs)))
+        .collect();
     let (_sender, receiver) = watch::channel(state.clone());
     let mut received =
         NonFinalizedBlocksListener::spawn(WatchReceiver::new(receiver), HashSet::new()).unwrap();
@@ -173,6 +178,10 @@ async fn listener_preserves_source_receipts() {
             let received = received.recv().await.unwrap();
             assert_eq!(received.hash, block.hash());
             assert_eq!(received.receipt_order, Some(expected));
+            assert!(Arc::ptr_eq(
+                &received.spent_outputs,
+                &expected_spent_outputs[&received.hash]
+            ));
         }
     })
     .await

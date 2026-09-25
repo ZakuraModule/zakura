@@ -183,6 +183,7 @@ where
                     hash,
                     block,
                     receipt_order,
+                    ..
                 }) = non_finalized_state_change.recv().await
                 else {
                     break;

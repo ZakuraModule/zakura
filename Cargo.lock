@@ -7739,6 +7739,7 @@ dependencies = [
 name = "zakura-grpc-geyser"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "futures-core",
  "metrics",

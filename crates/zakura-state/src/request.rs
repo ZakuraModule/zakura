@@ -2192,6 +2192,13 @@ pub enum ReadRequest {
         known_chain_tips: HashSet<block::Hash>,
     },
 
+    /// Returns [`ReadResponse::FinalizedBlocksListener`] with a channel receiver for blocks that
+    /// have just been durably committed to finalized state.
+    ///
+    /// This is a bounded, live-only notification stream. If a listener falls behind it must
+    /// recover from its own durable cursor; state commits are never delayed for listeners.
+    FinalizedBlocksListener,
+
     /// Returns `true` if the transparent output is spent in the best chain,
     /// or `false` if it is unspent.
     IsTransparentOutputSpent(transparent::OutPoint),
@@ -2260,6 +2267,7 @@ impl ReadRequest {
             ReadRequest::TipBlockSize => "tip_block_size",
             ReadRequest::ChainTips => "chain_tips",
             ReadRequest::NonFinalizedBlocksListener { .. } => "non_finalized_blocks_listener",
+            ReadRequest::FinalizedBlocksListener => "finalized_blocks_listener",
             ReadRequest::IsTransparentOutputSpent(_) => "is_transparent_output_spent",
         }
     }

@@ -681,11 +681,13 @@ async fn non_finalized_stream_preserves_receipts_within_a_session() -> Result<()
                 hash,
                 block: block.clone(),
                 receipt_order: Some(2),
+                spent_outputs: Arc::new(Default::default()),
             },
             NonFinalizedBlock {
                 hash,
                 block: block.clone(),
                 receipt_order: Some(1),
+                spent_outputs: Arc::new(Default::default()),
             },
         ] {
             sender.send(change).await?;

@@ -1,7 +1,7 @@
 //! State [`tower::Service`] response types.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -265,6 +265,12 @@ impl MinedTx {
 // platform.
 const NON_FINALIZED_STATE_CHANGE_BUFFER_SIZE: usize = 2 * MAX_BLOCK_REORG_HEIGHT as usize;
 
+/// How many committed finalized blocks a listener can lag before it must recover.
+///
+/// The finalized-state writer never waits for listeners. Keeping this capacity bounded prevents a
+/// stalled plugin from retaining an unbounded amount of block and spent-output data in the node.
+pub(crate) const FINALIZED_BLOCK_NOTIFICATION_BUFFER_SIZE: usize = 32;
+
 /// A listener for changes in the non-finalized state.
 #[derive(Clone, Debug)]
 pub struct NonFinalizedBlocksListener(pub Arc<tokio::sync::mpsc::Receiver<NonFinalizedBlock>>);
@@ -278,6 +284,8 @@ pub struct NonFinalizedBlock {
     pub block: Arc<Block>,
     /// Process-local order, absent for restored blocks or older primaries.
     pub receipt_order: Option<u64>,
+    /// Verified transparent outputs spent by this block, shared without cloning the map.
+    pub spent_outputs: Arc<HashMap<transparent::OutPoint, transparent::OrderedUtxo>>,
 }
 
 impl NonFinalizedBlocksListener {
@@ -310,6 +318,7 @@ impl NonFinalizedBlocksListener {
                 hash: cv_block.hash,
                 block: cv_block.block.clone(),
                 receipt_order: cv_block.receipt_order,
+                spent_outputs: Arc::clone(&cv_block.spent_outputs),
             });
 
         for new_block_with_hash in new_blocks {
@@ -418,6 +427,57 @@ impl PartialEq for NonFinalizedBlocksListener {
 }
 
 impl Eq for NonFinalizedBlocksListener {}
+
+/// A listener for finalized blocks immediately after their state commit succeeds.
+///
+/// If a receiver falls behind the bounded channel, it receives
+/// [`tokio::sync::broadcast::error::RecvError::Lagged`]. Callers must treat that as a source gap
+/// and recover independently; the state writer is deliberately never backpressured by listeners.
+#[derive(Clone, Debug)]
+pub struct FinalizedBlocksListener(
+    Arc<std::sync::Mutex<tokio::sync::broadcast::Receiver<FinalizedBlockNotification>>>,
+);
+
+/// A finalized block and the transparent outputs it spent, captured before the state deletes them.
+///
+/// The spent-output map is absent from historical block storage. It is available only to listeners
+/// that are attached while the block is committed.
+#[derive(Clone, Debug)]
+pub struct FinalizedBlockNotification {
+    /// Block hash.
+    pub hash: block::Hash,
+    /// Block height.
+    pub height: block::Height,
+    /// Complete block.
+    pub block: Arc<Block>,
+    /// Transparent outputs spent by inputs in this block.
+    pub spent_outputs: Arc<HashMap<transparent::OutPoint, transparent::OrderedUtxo>>,
+}
+
+impl FinalizedBlocksListener {
+    /// Wrap a newly subscribed finalized-block receiver.
+    pub(crate) fn new(
+        receiver: tokio::sync::broadcast::Receiver<FinalizedBlockNotification>,
+    ) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(receiver)))
+    }
+
+    /// Consume this listener and return its exclusive receiver.
+    pub fn into_receiver(self) -> tokio::sync::broadcast::Receiver<FinalizedBlockNotification> {
+        Arc::try_unwrap(self.0)
+            .expect("finalized-block listener receiver is not shared when it is consumed")
+            .into_inner()
+            .expect("finalized-block listener receiver mutex is not poisoned")
+    }
+}
+
+impl PartialEq for FinalizedBlocksListener {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for FinalizedBlocksListener {}
 
 /// Selected-chain body anchor and missing-body metadata for one block-sync query.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -658,6 +718,9 @@ pub enum ReadResponse {
     /// Response to [`ReadRequest::NonFinalizedBlocksListener`]
     NonFinalizedBlocksListener(NonFinalizedBlocksListener),
 
+    /// Response to [`ReadRequest::FinalizedBlocksListener`].
+    FinalizedBlocksListener(FinalizedBlocksListener),
+
     /// Response to [`ReadRequest::IsTransparentOutputSpent`]
     IsTransparentOutputSpent(bool),
 }
@@ -787,6 +850,7 @@ impl TryFrom<ReadResponse> for Response {
             | ReadResponse::MissingBlockBodyMetadata(_)
             | ReadResponse::Blocks(_)
             | ReadResponse::NonFinalizedBlocksListener(_)
+            | ReadResponse::FinalizedBlocksListener(_)
             | ReadResponse::IsTransparentOutputSpent(_) => {
                 Err("there is no corresponding Response for this ReadResponse")
             }

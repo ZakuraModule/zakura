@@ -33,8 +33,8 @@ use crate::{
     },
     tests::setup::{partial_nu5_chain_strategy, transaction_v4_from_coinbase},
     BlockAdmission, BoxError, CheckpointVerifiedBlock, CommitBlockError, Config,
-    HistoricalTreeUnavailable, ParentInputs, PruningConfig, Request, Response,
-    SemanticallyVerifiedBlock, StateInitError, StorageMode, ValidateContextError,
+    HistoricalTreeUnavailable, ParentInputs, PruningConfig, ReadRequest, ReadResponse, Request,
+    Response, SemanticallyVerifiedBlock, StateInitError, StorageMode, ValidateContextError,
     CHAIN_TIP_UPDATE_WAIT_LIMIT, MAX_HISTORICAL_TREE_REPLAY_BLOCKS,
 };
 
@@ -158,6 +158,41 @@ async fn block_info_does_not_wait_for_a_queued_parent() {
             .unwrap(),
         Response::BlockInfo(Some(_))
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn finalized_blocks_listener_receives_the_durable_commit() {
+    let _init_guard = zakura_test::init();
+    let network = Network::Mainnet;
+    let (mut state, read, _, _) = StateService::new(Config::ephemeral(), &network, Height::MAX, 0)
+        .await
+        .expect("the ephemeral state opens");
+    let listener = read
+        .oneshot(ReadRequest::FinalizedBlocksListener)
+        .await
+        .expect("finalized block listener subscription succeeds");
+    let ReadResponse::FinalizedBlocksListener(listener) = listener else {
+        panic!("state returns a finalized block listener response");
+    };
+    let mut listener = listener.into_receiver();
+    let genesis: Arc<Block> = zakura_test::vectors::BLOCK_MAINNET_GENESIS_BYTES
+        .zcash_deserialize_into()
+        .expect("genesis block deserializes");
+    let genesis_hash = genesis.hash();
+
+    state
+        .queue_and_commit_to_finalized_state(CheckpointVerifiedBlock::from(genesis))
+        .await
+        .expect("genesis commit request reaches the writer")
+        .expect("genesis commits");
+
+    let notification = timeout(Duration::from_secs(10), listener.recv())
+        .await
+        .expect("finalized notification arrives before timeout")
+        .expect("finalized notification channel stays open");
+    assert_eq!(notification.hash, genesis_hash);
+    assert_eq!(notification.height, Height::MIN);
+    assert!(notification.spent_outputs.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

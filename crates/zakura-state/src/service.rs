@@ -27,7 +27,7 @@ use std::{
 
 use futures::future::FutureExt;
 use indexmap::IndexMap;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tower::{util::BoxService, Service, ServiceExt};
 use tracing::{instrument, Instrument, Span};
 
@@ -54,7 +54,7 @@ use crate::{
         ReconsiderError,
     },
     request::TimedSpan,
-    response::NonFinalizedBlocksListener,
+    response::{FinalizedBlockNotification, FinalizedBlocksListener, NonFinalizedBlocksListener},
     service::{
         block_iter::{any_ancestor_blocks, any_chain_ancestor_iter},
         chain_tip::{ChainTipBlock, ChainTipChange, ChainTipSender, LatestChainTip},
@@ -288,6 +288,11 @@ pub struct ReadStateService {
     /// This state is only updated between requests,
     /// so it might include some block data that is also on `disk`.
     non_finalized_state_receiver: WatchReceiver<NonFinalizedState>,
+
+    /// Sends finalized blocks with the transparent outputs resolved during their commit.
+    ///
+    /// This is a bounded live notification stream. Senders never wait for receivers.
+    finalized_block_sender: broadcast::Sender<FinalizedBlockNotification>,
 
     /// The shared inner on-disk database for the finalized state.
     ///
@@ -1581,6 +1586,7 @@ impl ReadStateService {
             max_checkpoint_height: block::Height::MAX,
             db: finalized_state.db.clone(),
             non_finalized_state_receiver,
+            finalized_block_sender: finalized_state.finalized_block_sender(),
             block_write_task,
             block_write_failure,
             historical_trees,
@@ -2851,6 +2857,18 @@ impl Service<ReadRequest> for ReadStateService {
             .boxed();
         };
 
+        if matches!(req, ReadRequest::FinalizedBlocksListener) {
+            let finalized_blocks_listener =
+                FinalizedBlocksListener::new(self.finalized_block_sender.subscribe());
+
+            return async move {
+                Ok(ReadResponse::FinalizedBlocksListener(
+                    finalized_blocks_listener,
+                ))
+            }
+            .boxed();
+        }
+
         let request_handler = move || match req {
             // Used by the `getblockchaininfo` RPC.
             ReadRequest::UsageInfo => Ok(ReadResponse::UsageInfo(state.db.cached_size())),
@@ -3633,6 +3651,10 @@ impl Service<ReadRequest> for ReadStateService {
             }
 
             ReadRequest::NonFinalizedBlocksListener { .. } => {
+                unreachable!("should return early");
+            }
+
+            ReadRequest::FinalizedBlocksListener => {
                 unreachable!("should return early");
             }
 

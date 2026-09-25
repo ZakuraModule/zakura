@@ -4,20 +4,22 @@
 //! consensus and state-write tasks. Large payloads are shared through [`Arc`]
 //! so fan-out does not clone complete blocks for every plugin.
 
-use std::{fmt::Debug, sync::Arc, time::SystemTime};
+use std::{collections::HashMap, fmt::Debug, sync::Arc, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zakura_chain::{
     block::{self, Block},
+    parameters::Network,
     transaction::{self, UnminedTxId},
+    transparent,
 };
 
 /// The plugin callback interface version implemented by this crate.
-pub const GEYSER_INTERFACE_VERSION: u32 = 1;
+pub const GEYSER_INTERFACE_VERSION: u32 = 2;
 
 /// The event envelope schema version implemented by this crate.
-pub const EVENT_SCHEMA_VERSION: u32 = 1;
+pub const EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// A unique identifier for one node process event-producing session.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -87,6 +89,8 @@ impl PluginEvent {
 /// A validated block and its commit metadata.
 #[derive(Clone, Debug)]
 pub struct BlockEvent {
+    /// Network whose consensus rules validated this block.
+    pub network: Network,
     /// Block height.
     pub height: block::Height,
     /// Block hash.
@@ -95,26 +99,44 @@ pub struct BlockEvent {
     pub block: Arc<Block>,
     /// Process-local verifier receipt order, when available.
     pub receipt_order: Option<u64>,
+    /// Verified transparent outputs spent by this block.
+    ///
+    /// Checkpoint-verified or restored blocks can omit this context. Consumers
+    /// must treat a missing outpoint as unavailable rather than nonexistent.
+    pub spent_outputs: Arc<HashMap<transparent::OutPoint, transparent::OrderedUtxo>>,
     estimated_size_bytes: usize,
 }
 
 impl BlockEvent {
     /// Creates a block event and attributes the retained decoded block memory once.
     pub fn new(
+        network: Network,
         height: block::Height,
         hash: block::Hash,
         block: Arc<Block>,
         receipt_order: Option<u64>,
+        spent_outputs: Arc<HashMap<transparent::OutPoint, transparent::OrderedUtxo>>,
     ) -> Self {
+        let spent_output_bytes = spent_outputs.iter().fold(0usize, |total, (_, output)| {
+            total
+                .saturating_add(std::mem::size_of::<(
+                    transparent::OutPoint,
+                    transparent::OrderedUtxo,
+                )>())
+                .saturating_add(output.utxo.output.lock_script.as_raw_bytes().len())
+        });
         let estimated_size_bytes = usize::try_from(block.attributed_memory_size_bytes())
             .unwrap_or(usize::MAX)
+            .saturating_add(spent_output_bytes)
             .saturating_add(std::mem::size_of::<Self>());
 
         Self {
+            network,
             height,
             hash,
             block,
             receipt_order,
+            spent_outputs,
             estimated_size_bytes,
         }
     }

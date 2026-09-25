@@ -17,6 +17,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
+use tokio::sync::broadcast;
 
 use zakura_chain::{
     amount::NonNegative,
@@ -35,6 +36,7 @@ use crate::{
     constants::MAX_PRUNE_HEIGHTS_PER_COMMIT,
     error::CommitCheckpointVerifiedError,
     request::FinalizedBlock,
+    response::FinalizedBlockNotification,
     service::finalized_state::{
         disk_db::{DiskWriteBatch, ReadDisk, WriteDisk},
         disk_format::{
@@ -968,6 +970,7 @@ impl ZakuraDb {
         finalized: FinalizedBlock,
         prev_note_commitment_trees: Option<NoteCommitmentTrees>,
         network: &Network,
+        finalized_block_sender: &broadcast::Sender<FinalizedBlockNotification>,
         source: &str,
         retention: RetentionPlan,
         vct_data: VctWriteData,
@@ -1066,6 +1069,17 @@ impl ZakuraDb {
             },
         );
 
+        // The writer already resolved these UTXOs to prepare the state batch. Retain only their
+        // compact locations while a listener is attached, then move the existing UTXO copies into
+        // the notification after the durable commit. This adds no database reads and does not
+        // clone output scripts for the notification path.
+        let spent_output_locations = (finalized_block_sender.receiver_count() > 0).then(|| {
+            spent_utxos
+                .iter()
+                .map(|(outpoint, output_location, _)| (*outpoint, *output_location))
+                .collect::<HashMap<_, _>>()
+        });
+
         let spent_utxos_by_outpoint: HashMap<transparent::OutPoint, transparent::Utxo> =
             spent_utxos
                 .iter()
@@ -1149,7 +1163,7 @@ impl ZakuraDb {
             network,
             &finalized,
             new_outputs_by_out_loc,
-            spent_utxos_by_outpoint,
+            &spent_utxos_by_outpoint,
             spent_utxos_by_out_loc,
             #[cfg(feature = "indexer")]
             out_loc_by_outpoint,
@@ -1174,6 +1188,34 @@ impl ZakuraDb {
         commit(self, batch)?;
         metrics::histogram!("zakura.state.rocksdb.batch_commit.duration_seconds")
             .record(batch_start.elapsed().as_secs_f64());
+
+        if let Some(spent_output_locations) = spent_output_locations {
+            let spent_outputs = spent_utxos_by_outpoint
+                .into_iter()
+                .map(|(outpoint, utxo)| {
+                    let output_location = spent_output_locations.get(&outpoint).expect(
+                        "every finalized spent UTXO has a location captured from the same read",
+                    );
+                    (
+                        outpoint,
+                        transparent::OrderedUtxo::from_utxo(
+                            utxo,
+                            output_location.transaction_index().as_usize(),
+                        ),
+                    )
+                })
+                .collect();
+            let notification = FinalizedBlockNotification {
+                hash: finalized.hash,
+                height: finalized.height,
+                block: finalized.block.clone(),
+                spent_outputs: Arc::new(spent_outputs),
+            };
+
+            if finalized_block_sender.send(notification).is_err() {
+                metrics::counter!("state.finalized_block_listener.dropped.total").increment(1);
+            }
+        }
 
         tracing::trace!(?source, "committed block from");
 
@@ -1454,7 +1496,7 @@ impl DiskWriteBatch {
         network: &Network,
         finalized: &FinalizedBlock,
         new_outputs_by_out_loc: BTreeMap<OutputLocation, transparent::Utxo>,
-        spent_utxos_by_outpoint: HashMap<transparent::OutPoint, transparent::Utxo>,
+        spent_utxos_by_outpoint: &HashMap<transparent::OutPoint, transparent::Utxo>,
         spent_utxos_by_out_loc: BTreeMap<OutputLocation, transparent::Utxo>,
         #[cfg(feature = "indexer")] out_loc_by_outpoint: HashMap<
             transparent::OutPoint,
@@ -1500,7 +1542,7 @@ impl DiskWriteBatch {
                 network,
                 finalized,
                 &new_outputs_by_out_loc,
-                &spent_utxos_by_outpoint,
+                spent_utxos_by_outpoint,
                 &spent_utxos_by_out_loc,
                 #[cfg(feature = "indexer")]
                 &out_loc_by_outpoint,

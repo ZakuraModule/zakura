@@ -22,6 +22,8 @@ use std::{
     },
 };
 
+use tokio::sync::broadcast;
+
 use zakura_chain::{
     block, ironwood, orchard,
     parallel::tree::NoteCommitmentTrees,
@@ -38,6 +40,7 @@ use crate::{
     constants::{state_database_format_version_in_code, STATE_DATABASE_KIND},
     error::CommitCheckpointVerifiedError,
     request::{FinalizableBlock, FinalizedBlock, Treestate},
+    response::{FinalizedBlockNotification, FINALIZED_BLOCK_NOTIFICATION_BUFFER_SIZE},
     service::{check, queued_blocks::CheckpointCommit, QueuedCheckpointVerified},
     CheckpointVerifiedBlock, Config, StateInitError, ValidateContextError,
 };
@@ -322,9 +325,20 @@ pub struct FinalizedState {
 
     /// Commit-time verified-commitment-trees state.
     vct: VctCommitState,
+
+    /// Live finalized-block notifications, including transparent prevout context.
+    ///
+    /// The sender is shared between all state clones. Its bounded receivers must never delay a
+    /// consensus state commit.
+    finalized_block_sender: broadcast::Sender<FinalizedBlockNotification>,
 }
 
 impl FinalizedState {
+    /// Returns the sender used to subscribe to live finalized-block notifications.
+    pub(super) fn finalized_block_sender(&self) -> broadcast::Sender<FinalizedBlockNotification> {
+        self.finalized_block_sender.clone()
+    }
+
     /// Returns an on-disk database instance for `config` and `network`.
     /// If there is no existing database, creates a new database on disk.
     pub fn new(config: &Config, network: &Network) -> Result<Self, StateInitError> {
@@ -423,12 +437,15 @@ impl FinalizedState {
             .zip(db.finalized_tip_height())
             .is_some_and(|(last_checkpoint_height, tip)| tip < last_checkpoint_height);
 
+        let (finalized_block_sender, _) =
+            broadcast::channel(FINALIZED_BLOCK_NOTIFICATION_BUFFER_SIZE);
         let new_state = Self {
             debug_stop_at_height: config.debug_stop_at_height.map(block::Height),
             checkpoint_raw_tx_retention_start: None,
             checkpoint_raw_tx_archive_backlog: Arc::new(AtomicBool::new(false)),
             db,
             vct: VctCommitState::new(vct, is_vct_sync_below_last_checkpoint),
+            finalized_block_sender,
         };
 
         // Pruning is a one-way storage mode. Refuse to open a database that has
@@ -1363,6 +1380,7 @@ impl FinalizedState {
             finalized,
             prev_note_commitment_trees,
             &network,
+            &self.finalized_block_sender,
             source,
             retention,
             fast_write,

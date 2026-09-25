@@ -699,6 +699,7 @@ impl StartCmd {
 
         let geyser_runtime = geyser::init(
             &config.geyser,
+            config.network.network.clone(),
             read_only_state_service.clone(),
             chain_tip_change.clone(),
             mempool_transaction_subscriber.clone(),
