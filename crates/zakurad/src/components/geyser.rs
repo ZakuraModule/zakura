@@ -1,6 +1,9 @@
 //! Adapters from Zakura state and mempool notifications to Geyser plugin events.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use color_eyre::eyre::{eyre, Report};
 use tokio::{sync::broadcast, task::JoinHandle};
@@ -9,13 +12,14 @@ use tower::ServiceExt;
 use tracing::{error, info, warn};
 use zakura_chain::parameters::Network;
 use zakura_geyser_plugin_interface::{
-    BestChainChange, BlockEvent, EventKind, MempoolEvent, MempoolEventKind, PluginEvent,
+    BestChainChange, BlockEvent, CanonicalBlock, EventKind, MempoolEvent, MempoolEventKind,
+    PluginEvent,
 };
 use zakura_geyser_plugin_manager::{Config, GeyserPluginManager, PluginPublisher, PluginRegistry};
 use zakura_node_services::mempool::{MempoolChange, MempoolChangeKind, MempoolTxSubscriber};
 use zakura_state::{
     ChainTipChange, FinalizedBlockNotification, NonFinalizedBlock, ReadRequest, ReadResponse,
-    ReadStateService, TipAction,
+    ReadStateService, TipAction, MAX_BLOCK_REORG_HEIGHT,
 };
 
 /// Running manager and source-adapter tasks owned by `zakurad`.
@@ -110,6 +114,7 @@ pub async fn init(
     if manager.has_subscribers(EventKind::BestChainChanged) {
         adapters.push(tokio::spawn(forward_best_chain_changes(
             chain_tip_change,
+            read_state.clone(),
             publisher.clone(),
             shutdown.clone(),
         )));
@@ -219,22 +224,65 @@ async fn forward_finalized_blocks(
 
 async fn forward_best_chain_changes(
     mut changes: ChainTipChange,
+    read_state: ReadStateService,
     publisher: PluginPublisher,
     shutdown: CancellationToken,
 ) {
+    let mut canonical_chain = match CanonicalChainWindow::load(read_state.clone()).await {
+        Ok(canonical_chain) => canonical_chain,
+        Err(error) => {
+            warn!(?error, "failed to initialize Geyser canonical-chain window");
+            CanonicalChainWindow::default()
+        }
+    };
+
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             change = changes.wait_for_tip_change() => {
                 let change = match change {
-                    Ok(TipAction::Grow { block }) => BestChainChange::Grow {
-                        height: block.height,
-                        hash: block.hash,
-                        previous_block_hash: block.previous_block_hash,
-                        transaction_ids: block.transaction_hashes,
-                    },
+                    Ok(TipAction::Grow { block }) => {
+                        canonical_chain.push(CanonicalBlock {
+                            height: block.height,
+                            hash: block.hash,
+                            previous_block_hash: block.previous_block_hash,
+                        });
+                        BestChainChange::Grow {
+                            height: block.height,
+                            hash: block.hash,
+                            previous_block_hash: block.previous_block_hash,
+                            transaction_ids: block.transaction_hashes,
+                        }
+                    }
                     Ok(TipAction::Reset { height, hash }) => {
-                        BestChainChange::Reset { height, hash }
+                        let transition = canonical_chain
+                            .reset(read_state.clone(), height, hash)
+                            .await;
+                        match transition {
+                            Ok(transition) => BestChainChange::Reset {
+                                height,
+                                hash,
+                                disconnected_blocks: transition.disconnected_blocks.into(),
+                                connected_blocks: transition.connected_blocks.into(),
+                                diff_complete: transition.diff_complete,
+                            },
+                            Err(error) => {
+                                warn!(?error, ?height, ?hash, "failed to resolve canonical-chain reset");
+                                metrics::counter!(
+                                    "plugin.source.gaps.total",
+                                    "source" => "best_chain",
+                                    "reason" => "canonical_diff_unavailable"
+                                )
+                                .increment(1);
+                                BestChainChange::Reset {
+                                    height,
+                                    hash,
+                                    disconnected_blocks: Arc::new([]),
+                                    connected_blocks: Arc::new([]),
+                                    diff_complete: false,
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         warn!(?error, "Geyser best-chain source closed");
@@ -245,6 +293,140 @@ async fn forward_best_chain_changes(
                 publisher.try_publish(PluginEvent::BestChainChanged(change));
             }
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CanonicalChainWindow {
+    blocks: BTreeMap<zakura_chain::block::Height, CanonicalBlock>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CanonicalChainTransition {
+    disconnected_blocks: Vec<CanonicalBlock>,
+    connected_blocks: Vec<CanonicalBlock>,
+    diff_complete: bool,
+}
+
+impl CanonicalChainWindow {
+    async fn load(read_state: ReadStateService) -> Result<Self, Report> {
+        let tip = read_state
+            .clone()
+            .oneshot(ReadRequest::Tip)
+            .await
+            .map_err(|error| eyre!("failed to read best-chain tip: {error}"))?;
+        let ReadResponse::Tip(Some((tip_height, _))) = tip else {
+            return Ok(Self::default());
+        };
+
+        Self::load_at(read_state, tip_height).await
+    }
+
+    async fn load_at(
+        read_state: ReadStateService,
+        tip_height: zakura_chain::block::Height,
+    ) -> Result<Self, Report> {
+        let start_height =
+            zakura_chain::block::Height(tip_height.0.saturating_sub(MAX_BLOCK_REORG_HEIGHT));
+        let count = tip_height
+            .0
+            .saturating_sub(start_height.0)
+            .saturating_add(1);
+        let response = read_state
+            .oneshot(ReadRequest::BlocksByHeightRange {
+                start: start_height,
+                count,
+            })
+            .await
+            .map_err(|error| eyre!("failed to read canonical-chain window: {error}"))?;
+        let ReadResponse::Blocks(blocks) = response else {
+            return Err(eyre!(
+                "state returned an unexpected canonical-chain window response"
+            ));
+        };
+
+        let blocks = blocks
+            .into_iter()
+            .map(|(height, block, _)| {
+                (
+                    height,
+                    CanonicalBlock {
+                        height,
+                        hash: block.hash(),
+                        previous_block_hash: block.header.previous_block_hash,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self { blocks })
+    }
+
+    fn push(&mut self, block: CanonicalBlock) {
+        self.blocks.insert(block.height, block);
+        let minimum_height = block.height.0.saturating_sub(MAX_BLOCK_REORG_HEIGHT);
+        self.blocks.retain(|height, _| height.0 >= minimum_height);
+    }
+
+    async fn reset(
+        &mut self,
+        read_state: ReadStateService,
+        tip_height: zakura_chain::block::Height,
+        tip_hash: zakura_chain::block::Hash,
+    ) -> Result<CanonicalChainTransition, Report> {
+        let replacement = Self::load_at(read_state, tip_height).await?;
+        if replacement.blocks.get(&tip_height).map(|block| block.hash) != Some(tip_hash) {
+            return Err(eyre!(
+                "canonical-chain window tip does not match the announced reset tip"
+            ));
+        }
+
+        let transition = canonical_chain_transition(&self.blocks, &replacement.blocks);
+        *self = replacement;
+        Ok(transition)
+    }
+}
+
+fn canonical_chain_transition(
+    previous: &BTreeMap<zakura_chain::block::Height, CanonicalBlock>,
+    current: &BTreeMap<zakura_chain::block::Height, CanonicalBlock>,
+) -> CanonicalChainTransition {
+    let common_height = previous.iter().rev().find_map(|(height, block)| {
+        (current.get(height).map(|current| current.hash) == Some(block.hash)).then_some(*height)
+    });
+
+    let implicit_common_parent = common_height.is_none()
+        && previous
+            .first_key_value()
+            .is_some_and(|(previous_height, previous_block)| {
+                current
+                    .first_key_value()
+                    .is_some_and(|(current_height, current_block)| {
+                        previous_height == current_height
+                            && previous_block.previous_block_hash
+                                == current_block.previous_block_hash
+                    })
+            });
+    let diff_complete = common_height.is_some() || implicit_common_parent;
+    let after_common = |height: &&zakura_chain::block::Height| {
+        common_height.is_none_or(|common_height| **height > common_height)
+    };
+
+    let disconnected_blocks = previous
+        .iter()
+        .filter(|(height, _)| after_common(height))
+        .map(|(_, block)| *block)
+        .rev()
+        .collect();
+    let connected_blocks = current
+        .iter()
+        .filter(|(height, _)| after_common(height))
+        .map(|(_, block)| *block)
+        .collect();
+
+    CanonicalChainTransition {
+        disconnected_blocks,
+        connected_blocks,
+        diff_complete,
     }
 }
 
@@ -291,5 +473,63 @@ async fn forward_mempool_changes(
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zakura_chain::block::{Hash, Height};
+
+    fn block(height: u32, hash: u8, previous: u8) -> CanonicalBlock {
+        CanonicalBlock {
+            height: Height(height),
+            hash: Hash([hash; 32]),
+            previous_block_hash: Hash([previous; 32]),
+        }
+    }
+
+    fn chain(blocks: &[CanonicalBlock]) -> BTreeMap<Height, CanonicalBlock> {
+        blocks.iter().map(|block| (block.height, *block)).collect()
+    }
+
+    #[test]
+    fn canonical_reorg_disconnects_tip_first_and_connects_ancestor_first() {
+        let common = block(10, 10, 9);
+        let old_11 = block(11, 11, 10);
+        let old_12 = block(12, 12, 11);
+        let new_11 = block(11, 21, 10);
+        let new_12 = block(12, 22, 21);
+
+        let transition = canonical_chain_transition(
+            &chain(&[common, old_11, old_12]),
+            &chain(&[common, new_11, new_12]),
+        );
+
+        assert_eq!(transition.disconnected_blocks, vec![old_12, old_11]);
+        assert_eq!(transition.connected_blocks, vec![new_11, new_12]);
+        assert!(transition.diff_complete);
+    }
+
+    #[test]
+    fn canonical_reset_recovers_skipped_grows() {
+        let common = block(10, 10, 9);
+        let new_11 = block(11, 11, 10);
+        let new_12 = block(12, 12, 11);
+
+        let transition =
+            canonical_chain_transition(&chain(&[common]), &chain(&[common, new_11, new_12]));
+
+        assert!(transition.disconnected_blocks.is_empty());
+        assert_eq!(transition.connected_blocks, vec![new_11, new_12]);
+        assert!(transition.diff_complete);
+    }
+
+    #[test]
+    fn canonical_reset_marks_a_missing_common_ancestor_incomplete() {
+        let transition =
+            canonical_chain_transition(&chain(&[block(20, 20, 19)]), &chain(&[block(21, 31, 30)]));
+
+        assert!(!transition.diff_complete);
     }
 }

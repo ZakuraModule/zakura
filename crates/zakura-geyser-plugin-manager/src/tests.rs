@@ -89,6 +89,9 @@ fn best_chain_event(height: u32) -> PluginEvent {
     PluginEvent::BestChainChanged(BestChainChange::Reset {
         height: zakura_chain::block::Height(height),
         hash: zakura_chain::block::Hash([0; 32]),
+        disconnected_blocks: Arc::new([]),
+        connected_blocks: Arc::new([]),
+        diff_complete: false,
     })
 }
 

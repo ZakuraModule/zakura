@@ -16,10 +16,10 @@ use zakura_chain::{
 };
 
 /// The plugin callback interface version implemented by this crate.
-pub const GEYSER_INTERFACE_VERSION: u32 = 3;
+pub const GEYSER_INTERFACE_VERSION: u32 = 4;
 
 /// The event envelope schema version implemented by this crate.
-pub const EVENT_SCHEMA_VERSION: u32 = 3;
+pub const EVENT_SCHEMA_VERSION: u32 = 4;
 
 /// A unique identifier for one node process event-producing session.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -162,22 +162,48 @@ pub enum BestChainChange {
         height: block::Height,
         /// Best-chain hash after the reset.
         hash: block::Hash,
+        /// Blocks removed from the canonical chain, ordered from the old tip down.
+        disconnected_blocks: Arc<[CanonicalBlock]>,
+        /// Blocks added to the canonical chain, ordered from the common ancestor up.
+        connected_blocks: Arc<[CanonicalBlock]>,
+        /// True when the transition contains every block after a known common ancestor.
+        ///
+        /// Consumers must backfill canonical state when this is false.
+        diff_complete: bool,
     },
 }
 
 impl BestChainChange {
     fn estimated_size_bytes(&self) -> usize {
-        let transaction_bytes = match self {
+        let payload_bytes = match self {
             Self::Grow {
                 transaction_ids, ..
             } => transaction_ids
                 .len()
                 .saturating_mul(std::mem::size_of::<transaction::Hash>()),
-            Self::Reset { .. } => 0,
+            Self::Reset {
+                disconnected_blocks,
+                connected_blocks,
+                ..
+            } => disconnected_blocks
+                .len()
+                .saturating_add(connected_blocks.len())
+                .saturating_mul(std::mem::size_of::<CanonicalBlock>()),
         };
 
-        std::mem::size_of::<Self>().saturating_add(transaction_bytes)
+        std::mem::size_of::<Self>().saturating_add(payload_bytes)
     }
+}
+
+/// A block reference in an atomic canonical-chain transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanonicalBlock {
+    /// Block height.
+    pub height: block::Height,
+    /// Block hash.
+    pub hash: block::Hash,
+    /// Parent block hash.
+    pub previous_block_hash: block::Hash,
 }
 
 /// A local mempool transition.
