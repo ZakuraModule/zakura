@@ -19,7 +19,7 @@ use zakura_chain::{
 pub const GEYSER_INTERFACE_VERSION: u32 = 4;
 
 /// The event envelope schema version implemented by this crate.
-pub const EVENT_SCHEMA_VERSION: u32 = 4;
+pub const EVENT_SCHEMA_VERSION: u32 = 5;
 
 /// A unique identifier for one node process event-producing session.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
