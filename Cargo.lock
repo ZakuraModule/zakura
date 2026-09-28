@@ -7756,6 +7756,7 @@ dependencies = [
  "toml 0.8.23",
  "tonic",
  "tonic-health",
+ "tonic-reflection",
  "tracing",
  "zakura-chain",
  "zakura-geyser-plugin-interface",
